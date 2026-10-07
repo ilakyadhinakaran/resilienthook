@@ -9,8 +9,11 @@ import boto3
 from botocore.exceptions import ClientError
 
 TABLE = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
+SQS = boto3.client("sqs")
 SSM = boto3.client("ssm")
+QUEUE_URL = os.environ["QUEUE_URL"]
 TTL_DAYS = 7
+MAX_INLINE_PAYLOAD = 200_000  # bytes; keep well under the SQS message limit
 
 _secret = None  # cached across warm invocations
 
@@ -56,6 +59,7 @@ def handler(event, context):
     event_type = headers.get("x-github-event", "unknown")
     now = int(time.time())
 
+    # 1. Record the event (idempotent: first writer wins).
     try:
         TABLE.put_item(
             Item={
@@ -65,16 +69,31 @@ def handler(event, context):
                 "received_at": now,
                 "expires_at": now + TTL_DAYS * 86400,
             },
-            # Idempotency: first writer wins.
             ConditionExpression="attribute_not_exists(event_id)",
         )
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # TEMPORARY (Phase 2): Phase 4 changes this to short-circuit
+            # TEMPORARY (Phase 2/3): Phase 4 changes this to short-circuit
             # only when status is PROCESSING/PROCESSED.
             _log(msg="duplicate", event_id=delivery_id)
             return _resp(200, "duplicate")
         raise
+
+    # 2. Hand it to the worker queue.
+    message = {"event_id": delivery_id, "event_type": event_type}
+    if len(raw) <= MAX_INLINE_PAYLOAD:
+        message["payload"] = raw.decode("utf-8", errors="replace")
+    else:
+        message["payload_omitted"] = True
+
+    try:
+        SQS.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(message))
+    except Exception as e:  # noqa: BLE001
+        # Row stays RECEIVED. Returning 5xx (not 200) tells GitHub the
+        # delivery failed, so it shows up as failed in the deliveries API
+        # and the reconciler (Phase 4) can recover it.
+        _log(msg="enqueue_failed", event_id=delivery_id, error=str(e))
+        return _resp(503, "enqueue failed")
 
     _log(msg="received", event_id=delivery_id, event_type=event_type)
     return _resp(202, "received")
