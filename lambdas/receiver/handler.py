@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import time
 
 import boto3
@@ -12,8 +13,13 @@ TABLE = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
 SQS = boto3.client("sqs")
 SSM = boto3.client("ssm")
 QUEUE_URL = os.environ["QUEUE_URL"]
+FAIL_RATE = float(os.environ.get("FAIL_RATE", "0"))
 TTL_DAYS = 7
 MAX_INLINE_PAYLOAD = 200_000  # bytes; keep well under the SQS message limit
+
+# Existing rows in these states still need processing, so a repeat delivery
+# (e.g. a reconciler-triggered redelivery) is re-enqueued, not ignored.
+REENQUEUE_STATES = {"RECEIVED", "PROCESSING"}
 
 _secret = None  # cached across warm invocations
 
@@ -57,9 +63,16 @@ def handler(event, context):
         return _resp(400, "missing delivery id")
 
     event_type = headers.get("x-github-event", "unknown")
+
+    # Fault injection for chaos tests: simulate an outage. The event is
+    # never recorded, so only the reconciler can recover it.
+    if random.random() < FAIL_RATE:
+        _log(msg="injected_failure", event_id=delivery_id)
+        return _resp(503, "injected failure")
+
     now = int(time.time())
 
-    # 1. Record the event (idempotent: first writer wins).
+    # 1. Record the event (first writer wins).
     try:
         TABLE.put_item(
             Item={
@@ -70,14 +83,20 @@ def handler(event, context):
                 "expires_at": now + TTL_DAYS * 86400,
             },
             ConditionExpression="attribute_not_exists(event_id)",
+            ReturnValuesOnConditionCheckFailure="ALL_OLD",
         )
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # TEMPORARY (Phase 2/3): Phase 4 changes this to short-circuit
-            # only when status is PROCESSING/PROCESSED.
-            _log(msg="duplicate", event_id=delivery_id)
+        if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        status = e.response.get("Item", {}).get("status", {}).get("S")
+        if status not in REENQUEUE_STATES:
+            # PROCESSED or FAILED: genuinely nothing to do.
+            _log(msg="duplicate", event_id=delivery_id, status=status)
             return _resp(200, "duplicate")
-        raise
+        # RECEIVED/PROCESSING: a previous attempt never finished. Fall
+        # through and enqueue again — the worker's conditional claim keeps
+        # this safe even if another copy is already in the queue.
+        _log(msg="re_enqueue", event_id=delivery_id, status=status)
 
     # 2. Hand it to the worker queue.
     message = {"event_id": delivery_id, "event_type": event_type}
@@ -89,9 +108,8 @@ def handler(event, context):
     try:
         SQS.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(message))
     except Exception as e:  # noqa: BLE001
-        # Row stays RECEIVED. Returning 5xx (not 200) tells GitHub the
-        # delivery failed, so it shows up as failed in the deliveries API
-        # and the reconciler (Phase 4) can recover it.
+        # Row stays RECEIVED. 5xx marks the delivery as failed on GitHub's
+        # side, and the reconciler will redeliver it.
         _log(msg="enqueue_failed", event_id=delivery_id, error=str(e))
         return _resp(503, "enqueue failed")
 
