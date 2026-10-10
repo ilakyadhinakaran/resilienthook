@@ -1,0 +1,18 @@
+{
+  "name": "combined",
+  "receiver_fail": 0.2,
+  "worker_fail": 0.3,
+  "events": 151,
+  "lost_initially": 33,
+  "worker_crashed": 51,
+  "affected": 74,
+  "recovered": 74,
+  "unrecoverable": 0,
+  "still_pending": 0,
+  "duplicates": 0,
+  "recovery_rate_pct": 100.0,
+  "recovery_median_s": 180,
+  "recovery_max_s": 477,
+  "dlq_new_messages": 0,
+  "test_minutes": 8.8
+}

@@ -1,0 +1,18 @@
+{
+  "name": "baseline",
+  "receiver_fail": 0.0,
+  "worker_fail": 0.0,
+  "events": 151,
+  "lost_initially": 0,
+  "worker_crashed": 0,
+  "affected": 0,
+  "recovered": 0,
+  "unrecoverable": 0,
+  "still_pending": 0,
+  "duplicates": 0,
+  "recovery_rate_pct": null,
+  "recovery_median_s": null,
+  "recovery_max_s": null,
+  "dlq_new_messages": 0,
+  "test_minutes": 6.5
+}

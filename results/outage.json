@@ -1,0 +1,18 @@
+{
+  "name": "outage",
+  "receiver_fail": 0.2,
+  "worker_fail": 0.0,
+  "events": 151,
+  "lost_initially": 28,
+  "worker_crashed": 0,
+  "affected": 28,
+  "recovered": 28,
+  "unrecoverable": 0,
+  "still_pending": 0,
+  "duplicates": 0,
+  "recovery_rate_pct": 100.0,
+  "recovery_median_s": 213,
+  "recovery_max_s": 382,
+  "dlq_new_messages": 0,
+  "test_minutes": 6.7
+}
